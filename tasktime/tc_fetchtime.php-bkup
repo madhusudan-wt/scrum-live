@@ -1,0 +1,147 @@
+<?php
+require_once __DIR__ . '/../dbConfig.php';
+
+$token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1laWQiOiIyY2ZkMzdjOS0zODE3LTRkYmQtODI4ZC1hYTY3MWFlY2E0YTMiLCJDb21wYW55IjoiMGY5ZTU1MjYtMDE0Mi00ZWQ2LWE4YmEtZjYwNWY5MGVhNGE0IiwibmJmIjoxNzEwODYzNTE5LCJleHAiOjIxNDI4NjM1MTksImlhdCI6MTcxMDg2MzUxOX0.d-YTpHdW4t_HWSuwUHX-Fm3s5LMZfX0IzwlQ8dKnxg8";
+$apiBase = "https://webiators.v3.timechamp.io/swagger/api/activity/worklog";
+
+// Set timezone
+date_default_timezone_set('Asia/Kolkata');
+
+// Get current time and 24 hours ago
+$dateTo = date('Y-m-d\TH:i:s.000');
+$dateFrom = date('Y-m-d\TH:i:s.000', strtotime('-24 hours'));
+
+$dateToEncoded = rawurlencode($dateTo);
+$dateFromEncoded = rawurlencode($dateFrom);
+
+// Step 1: Fetch tasks
+$sql = "SELECT * FROM tasks WHERE status = 'to_do' OR status = 'in_progress' ORDER BY id DESC LIMIT 20";
+$result = $conn->query($sql);
+
+if ($result && $result->num_rows > 0) {
+    while ($task = $result->fetch_assoc()) {
+        $taskId = $task['id'];
+        $taskTitle = $task['title'] . '-' . $taskId;
+        $assignedTo = $task['assigned_to'];
+        $projectId = $task['project_id'];
+
+        // Get project name
+        $projectResult = $conn->query("SELECT title FROM projects WHERE id = $projectId");
+        $project = $projectResult ? $projectResult->fetch_assoc() : null;
+        $projectName = $project ? $project['title'] : null;
+
+        if (!$projectName) {
+            echo "Skipping task ID $taskId: Project not found.<br>";
+            continue;
+        }
+
+        // Build API URL
+        $url = "$apiBase?ProjectName=" . rawurlencode($projectName)
+             . "&TaskName=" . rawurlencode($taskTitle)
+             . "&EmployeeId=$assignedTo"
+             . "&DateFrom=$dateFromEncoded&DateTo=$dateToEncoded";
+
+        // Call TimeChamp API
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "accept: application/json",
+            "Authorization: Bearer $token"
+        ]);
+        $apiResponse = curl_exec($ch);
+        curl_close($ch);
+
+        // Debug output
+$data = json_decode($apiResponse, true);
+
+// if (json_last_error() === JSON_ERROR_NONE && !empty($data['data'])) {
+//     foreach ($data['data'] as $entry) {
+//         // Step 1: Extract task_id from taskName
+//         $taskName = $entry['taskName'];
+//         preg_match('/-(\d+)$/', $taskName, $matches);
+//         $extractedTaskId = $matches[1] ?? null;
+
+//         if (!$extractedTaskId) {
+//             echo "Task ID not found in taskName: $taskName<br>";
+//             continue;
+//         }
+
+//         // Step 2: Get time info
+//        echo  $startTime = $entry['userTaskStartTime'];
+//        echo  "</br>". $endTime = $entry['userTaskEndTime'];
+//         echo "</br>". $timeSpentMin = $entry['timeSpentOnTaskInMin'];
+//         echo "</br>". $taskName . "</br>";
+
+//         // Step 3: Update project_time table
+//         // $stmt = $conn->prepare("UPDATE project_time SET start_time = ?, end_time = ?, hours = ? WHERE task_id = ?");
+//         // $stmt->bind_param("ssii", $startTime, $endTime, $timeSpentMin, $extractedTaskId);
+
+//         // if ($stmt->execute()) {
+//         //     echo "Updated project_time for task_id $extractedTaskId<br>";
+//         // } else {
+//         //     echo "Failed to update project_time for task_id $extractedTaskId<br>";
+//         // }
+//     }
+// }
+if (json_last_error() === JSON_ERROR_NONE && !empty($data['data'])) {
+    foreach ($data['data'] as $entry) {
+        preg_match('/-(\d+)$/', $entry['taskName'], $matches);
+        $extractedTaskId = $matches[1] ?? null;
+
+        if (!$extractedTaskId) {
+            echo "❌ Task ID not found in taskName: {$entry['taskName']}<br>";
+            continue;
+        }
+        // $projectId = $task['project_id'];
+        $startTime = $entry['userTaskStartTime'];
+        $endTime = $entry['userTaskEndTime'];
+        $timeSpentMin = (int)$entry['timeSpentOnTaskInMin'];
+
+        // Convert to float hours if needed (for FLOAT column)
+        // $hours = round($timeSpentMin / 60, 2); // e.g., 2.25 hours
+        $hours = 0;
+
+        // Insert into project_time table as a new row
+        // $stmt = $conn->prepare("INSERT INTO project_time (task_id, project_id, start_time, end_time, hours) VALUES (?, ?, ?, ?)");
+        // $stmt->bind_param("issd", $extractedTaskId, $projectId, $startTime, $endTime, $hours);
+
+        // $stmt = $conn->prepare("INSERT INTO project_time (task_id, project_id,user_id, start_time, end_time, hours) VALUES (?, ?, ?, ?, ?,?)");
+        // $stmt->bind_param("iiissd", $extractedTaskId, $projectId, $assignedTo,$startTime, $endTime, $hours);
+// Check if the entry already exists
+$checkStmt = $conn->prepare("SELECT id FROM project_time WHERE task_id = ? AND project_id = ? AND user_id = ? AND start_time = ? AND end_time = ?");
+$checkStmt->bind_param("iiiss", $extractedTaskId, $projectId, $assignedTo, $startTime, $endTime);
+$checkStmt->execute();
+$checkResult = $checkStmt->get_result();
+
+if ($checkResult->num_rows === 0) {
+    // Entry does not exist, insert
+    $stmt = $conn->prepare("INSERT INTO project_time (task_id, project_id, user_id, start_time, end_time, hours) VALUES (?, ?, ?, ?, ?, ?)");
+    $stmt->bind_param("iiissd", $extractedTaskId, $projectId, $assignedTo, $startTime, $endTime, $hours);
+
+    if ($stmt->execute()) {
+        echo "✅ Inserted log: Task ID $extractedTaskId — $hours hours ($startTime to $endTime)<br>";
+    } else {
+        echo "❌ Failed to insert log for task ID $extractedTaskId<br>";
+    }
+} else {
+    echo "⚠️ Log already exists for task ID $extractedTaskId — skipping insert.<br>";
+}
+
+        // if ($stmt->execute()) {
+        //     echo "✅ Inserted log: Task ID $extractedTaskId — $hours hours ($startTime to $endTime)<br>";
+        // } else {
+        //     echo "❌ Failed to insert log for task ID $extractedTaskId<br>";
+        // }
+    }
+}
+
+
+ else {
+    echo "Invalid or empty API response for task ID $taskId<br>";
+}
+    }
+} else {
+    echo "No matching tasks found.";
+}
+
+$conn->close();
